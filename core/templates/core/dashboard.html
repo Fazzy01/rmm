@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>RMM Test Dashboard - {{ device_id }}</title>
+<style>
+  body { font-family: system-ui, sans-serif; background: #111; color: #eee; margin: 0; padding: 20px; }
+  h1 { font-size: 18px; }
+  .status { display:inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; }
+  .online { background: #1a7f37; } .offline { background: #7f1a1a; }
+  .grid { display: flex; gap: 20px; margin-top: 16px; flex-wrap: wrap; }
+  .screen { width: 100%; max-width: 480px; aspect-ratio: 16 / 9; background: #000; border: 1px solid #333; object-fit: contain; cursor: crosshair; outline: none; display: block; }
+  .screen:focus-within, .screen:focus { border-color: #2d6cdf; }
+  .screen.minimized { display: none; }
+  /* When maximized via the Fullscreen API the browser sizes the element to
+     the whole viewport; drop the 480px cap and 16:9 box so it fills it. */
+  .screen:fullscreen { max-width: none; width: 100vw; height: 100vh; aspect-ratio: auto; border: none; }
+  .screen-minimized-note { display: none; font-size: 12px; color: #888; padding: 24px; text-align: center; border: 1px dashed #333; border-radius: 4px; }
+  .panel.is-minimized .screen-minimized-note { display: block; }
+  button.winctl { background: #444; }
+  .hint { font-size: 12px; color: #888; margin: 4px 0 0; }
+  textarea, input[type=text] { width: 100%; background: #1a1a1a; color: #0f0; border: 1px solid #333; font-family: monospace; padding: 8px; box-sizing: border-box; }
+  #console { height: 300px; overflow-y: auto; white-space: pre-wrap; }
+  button { background: #2d6cdf; color: #fff; border: none; padding: 8px 14px; border-radius: 4px; cursor: pointer; margin: 4px 4px 4px 0; }
+  button:hover { background: #1f56b8; }
+  button.kb { background: #444; }
+  button.kb.active { background: #2d6cdf; }
+  .panel { flex: 1 1 300px; background: #1a1a1a; padding: 12px; border-radius: 6px; min-width: 280px; }
+</style>
+</head>
+<body>
+  <a id="backLink" href="{% url 'device_list' %}" style="color:#8ab4ff; text-decoration:none; font-size:14px;">&larr; All devices</a>
+  <h1>Device: {{ device_id }} <span id="agentStatus" class="status offline">agent offline</span></h1>
+  <button class="kb" id="kbToggle" type="button">&#9000; Show keyboard (for: <span id="kbTargetLabel">user's screen</span>)</button>
+  <button class="kb" id="rightClickToggle" type="button">Right-click (next tap)</button>
+  <button class="kb mod" id="ctrlToggle" type="button">Ctrl</button>
+  <button class="kb mod" id="shiftToggle" type="button">Shift</button>
+  <button class="kb mod" id="altToggle" type="button">Alt</button>
+  <p class="hint">Keyboard only pops up when you tap "Show keyboard" - tapping the screens themselves just clicks/navigates. Double-tap for double-click; tap "Right-click" then tap the screen once for a right-click. Tap Ctrl/Shift/Alt then a key to send a shortcut (e.g. Ctrl+Shift+N = new folder, F2 = rename); the modifier releases after one key.</p>
+
+  <div class="grid">
+    <div class="panel">
+      <h3>User's Screen</h3>
+      <img id="screenUser" class="screen" src="" alt="waiting for frame...">
+      <div class="screen-minimized-note">Screen minimized</div>
+      <div>
+        <button type="button" class="winctl" data-target="screenUser" data-action="min">Minimize</button>
+        <button type="button" class="winctl" data-target="screenUser" data-action="max">Maximize</button>
+        <button onclick="sendCmd({type:'start_screen_stream', payload:{view:'user'}})">Start</button>
+        <button onclick="sendCmd({type:'stop_screen_stream', payload:{view:'user'}})">Stop</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>Isolated Desktop</h3>
+      <img id="screenIsolated" class="screen" src="" alt="waiting for frame...">
+      <div class="screen-minimized-note">Screen minimized</div>
+      <div>
+        <button type="button" class="winctl" data-target="screenIsolated" data-action="min">Minimize</button>
+        <button type="button" class="winctl" data-target="screenIsolated" data-action="max">Maximize</button>
+        <button onclick="sendCmd({type:'start_screen_stream', payload:{view:'isolated'}})">Start</button>
+        <button onclick="sendCmd({type:'stop_screen_stream', payload:{view:'isolated'}})">Stop</button>
+        <button onclick="sendCmd({type:'create_isolated_desktop'})">Enable isolated session (Win)</button>
+        <button onclick="sendCmd({type:'exit_isolated_desktop'})">Exit isolated session</button>
+        <button onclick="sendCmd({type:'clear_isolated_desktop'})">Clear session (close everything, start fresh)</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>PowerShell / Shell</h3>
+      <div id="console"></div>
+      <div style="display:flex; gap:6px;">
+        <input type="text" id="cmdInput" placeholder="Type a command" style="flex:1;">
+        <button id="cmdRun" type="button" style="margin:0;">Run</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+  const deviceId = "{{ device_id }}";
+  const token = new URLSearchParams(window.location.search).get("token") || "";
+  const proto = window.location.protocol === "https:" ? "wss" : "ws";
+  const wsUrl = `${proto}://${window.location.host}/ws/admin/${deviceId}/` + (token ? `?token=${encodeURIComponent(token)}` : "");
+  const ws = new WebSocket(wsUrl);
+  if (token) {
+    document.getElementById("backLink").href = "{% url 'device_list' %}?token=" + encodeURIComponent(token);
+  }
+  const screenUserEl = document.getElementById("screenUser");
+  const screenIsolatedEl = document.getElementById("screenIsolated");
+  const consoleEl = document.getElementById("console");
+  const statusEl = document.getElementById("agentStatus");
+  const cmdInput = document.getElementById("cmdInput");
+  const cmdRun = document.getElementById("cmdRun");
+  const kbToggle = document.getElementById("kbToggle");
+  const kbTargetLabel = document.getElementById("kbTargetLabel");
+  const rightClickToggle = document.getElementById("rightClickToggle");
+
+  // Sticky modifier keys (Ctrl/Shift/Alt). Tap to arm; they're attached to
+  // the next key sent, then auto-released (one-shot), which is the only sane
+  // way to compose shortcuts on a touchscreen with no physical modifiers.
+  const activeMods = new Set();
+  const modButtons = {
+    ctrl: document.getElementById("ctrlToggle"),
+    shift: document.getElementById("shiftToggle"),
+    alt: document.getElementById("altToggle"),
+  };
+  function renderMods() {
+    for (const m in modButtons) modButtons[m].classList.toggle("active", activeMods.has(m));
+  }
+  // Combine armed sticky mods with any physically-held modifiers on evt.
+  function collectMods(evt) {
+    const mods = new Set(activeMods);
+    if (evt) {
+      if (evt.ctrlKey) mods.add("ctrl");
+      if (evt.shiftKey) mods.add("shift");
+      if (evt.altKey) mods.add("alt");
+    }
+    return [...mods];
+  }
+  function clearStickyMods() {
+    if (activeMods.size) { activeMods.clear(); renderMods(); }
+  }
+  for (const m in modButtons) {
+    modButtons[m].addEventListener("click", () => {
+      if (activeMods.has(m)) activeMods.delete(m); else activeMods.add(m);
+      renderMods();
+      keyCatcher.focus(); // keep the hidden input focused so the next key is captured
+    });
+  }
+
+  function log(line) {
+    consoleEl.textContent += line + "\n";
+    consoleEl.scrollTop = consoleEl.scrollHeight;
+  }
+
+  const NOISY_TYPES = new Set(["mouse_move", "mouse_down", "mouse_up", "mouse_dblclick", "mouse_wheel", "key_down", "key_up"]);
+
+  function sendCmd(obj) {
+    ws.send(JSON.stringify(obj));
+    if (!NOISY_TYPES.has(obj.type)) log("> " + (obj.command || obj.type));
+  }
+
+  // Hidden real <input> for keyboard capture. A phone only pops up its
+  // on-screen keyboard for a genuine text-input element, and we only want
+  // that popup when the admin explicitly asks for it (via kbToggle) - not
+  // on every tap, which would make navigating/clicking around unusable.
+  const keyCatcher = document.createElement("input");
+  keyCatcher.type = "text";
+  keyCatcher.autocomplete = "off";
+  keyCatcher.autocapitalize = "off";
+  keyCatcher.autocorrect = "off";
+  keyCatcher.spellcheck = false;
+  keyCatcher.setAttribute("aria-hidden", "true");
+  keyCatcher.style.cssText = "position:absolute; opacity:0; width:1px; height:1px; left:-1000px;";
+  document.body.appendChild(keyCatcher);
+
+  let activeView = "user"; // which screen keyboard/keyboard-toggle input targets
+
+  function setActiveView(view) {
+    activeView = view;
+    kbTargetLabel.textContent = view === "isolated" ? "isolated desktop" : "user's screen";
+  }
+
+  kbToggle.addEventListener("click", () => {
+    keyCatcher.focus();
+  });
+  keyCatcher.addEventListener("focus", () => kbToggle.classList.add("active"));
+  keyCatcher.addEventListener("blur", () => kbToggle.classList.remove("active"));
+
+  const CONTROL_KEYS = new Set([
+    "Enter", "Backspace", "Tab", "Escape", "Delete",
+    "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
+  ]);
+  let lastCatcherValue = "";
+
+  keyCatcher.addEventListener("keydown", (evt) => {
+    const mods = collectMods(evt);
+    const isChord = evt.ctrlKey || evt.altKey || activeMods.has("ctrl") || activeMods.has("alt");
+    if (CONTROL_KEYS.has(evt.key)) {
+      sendCmd({ type: "key_down", payload: { key: evt.key, view: activeView, mods } });
+      evt.preventDefault();
+    } else if (isChord && evt.key.length === 1) {
+      // A shortcut like Ctrl+N produces no "input" event, so send it here.
+      sendCmd({ type: "key_down", payload: { key: evt.key, view: activeView, mods } });
+      clearStickyMods();
+      evt.preventDefault();
+    }
+  });
+  keyCatcher.addEventListener("keyup", (evt) => {
+    if (CONTROL_KEYS.has(evt.key)) {
+      sendCmd({ type: "key_up", payload: { key: evt.key, view: activeView, mods: collectMods(evt) } });
+      clearStickyMods();
+    }
+  });
+  keyCatcher.addEventListener("input", () => {
+    const value = keyCatcher.value;
+    if (value.length > lastCatcherValue.length) {
+      const mods = collectMods(null);
+      for (const ch of value.slice(lastCatcherValue.length)) {
+        sendCmd({ type: "key_down", payload: { key: ch, view: activeView, mods } });
+        sendCmd({ type: "key_up", payload: { key: ch, view: activeView, mods } });
+      }
+      if (mods.length) clearStickyMods();
+    }
+    lastCatcherValue = value;
+    if (value.length > 40) {
+      keyCatcher.value = "";
+      lastCatcherValue = "";
+    }
+  });
+
+  // Translate a pointer event's page position into a 0.0-1.0 fraction of
+  // the *actual* streamed frame for the given <img>, accounting for the
+  // letterboxing that object-fit:contain introduces when the frame's
+  // aspect ratio doesn't exactly match the displayed box.
+  function toNormalized(imgEl, evt) {
+    const nw = imgEl.naturalWidth, nh = imgEl.naturalHeight;
+    if (!nw || !nh) return null;
+    const rect = imgEl.getBoundingClientRect();
+    const scale = Math.min(rect.width / nw, rect.height / nh);
+    const dispW = nw * scale, dispH = nh * scale;
+    const offsetX = (rect.width - dispW) / 2, offsetY = (rect.height - dispH) / 2;
+    const localX = evt.clientX - rect.left - offsetX;
+    const localY = evt.clientY - rect.top - offsetY;
+    if (localX < 0 || localY < 0 || localX > dispW || localY > dispH) return null;
+    return { x: localX / dispW, y: localY / dispH };
+  }
+
+  const BUTTON_NAMES = ["left", "middle", "right"];
+
+  // Armed by the "Right-click" button; consumed by the very next click/tap
+  // on either screen, then auto-disarmed. Needed because touch has no
+  // physical right button at all.
+  let rightClickArmed = false;
+  rightClickToggle.addEventListener("click", () => {
+    rightClickArmed = !rightClickArmed;
+    rightClickToggle.classList.toggle("active", rightClickArmed);
+  });
+
+  // Double-tap/double-click detection: two clicks on the same screen,
+  // close together in time and position. Decided at press-time (not
+  // release) so the correct message (a normal down, vs. the special
+  // double-click message) goes out immediately - see agent.py's
+  // mouse_dblclick handling for why a plain second down/up isn't enough
+  // on the isolated-desktop path.
+  let lastTap = null; // { time, x, y, view }
+  const DBLTAP_MS = 350;
+  const DBLTAP_DIST = 0.04; // normalized (0-1) fraction of screen size
+
+  function takeClickButton() {
+    if (rightClickArmed) {
+      rightClickArmed = false;
+      rightClickToggle.classList.remove("active");
+      return "right";
+    }
+    return "left";
+  }
+
+  function isDoubleTap(view, p) {
+    if (!lastTap || lastTap.view !== view) return false;
+    const dt = performance.now() - lastTap.time;
+    const dx = p.x - lastTap.x, dy = p.y - lastTap.y;
+    return dt < DBLTAP_MS && Math.sqrt(dx * dx + dy * dy) < DBLTAP_DIST;
+  }
+
+  function wireScreen(imgEl, view) {
+    let lastMoveSent = 0;
+    let activeButton = "left"; // remembered between this gesture's down and up
+
+    function press(p) {
+      setActiveView(view);
+      const button = takeClickButton();
+      if (button === "left" && isDoubleTap(view, p)) {
+        activeButton = "left";
+        lastTap = null;
+        sendCmd({ type: "mouse_dblclick", payload: { ...p, view, button: "left" } });
+      } else {
+        activeButton = button;
+        lastTap = button === "left" ? { time: performance.now(), x: p.x, y: p.y, view } : null;
+        sendCmd({ type: "mouse_down", payload: { ...p, view, button } });
+      }
+    }
+
+    function release(p) {
+      sendCmd({ type: "mouse_up", payload: { ...p, view, button: activeButton } });
+    }
+
+    imgEl.addEventListener("mousemove", (evt) => {
+      const now = performance.now();
+      if (now - lastMoveSent < 40) return; // ~25/s, plenty for a 2fps view
+      lastMoveSent = now;
+      const p = toNormalized(imgEl, evt);
+      if (p) sendCmd({ type: "mouse_move", payload: { ...p, view } });
+    });
+    imgEl.addEventListener("mousedown", (evt) => {
+      const p = toNormalized(imgEl, evt);
+      if (p) press(p);
+      evt.preventDefault();
+    });
+    imgEl.addEventListener("mouseup", (evt) => {
+      const p = toNormalized(imgEl, evt);
+      if (p) release(p);
+    });
+    imgEl.addEventListener("wheel", (evt) => {
+      const p = toNormalized(imgEl, evt) || { x: 0.5, y: 0.5 };
+      sendCmd({ type: "mouse_wheel", payload: { ...p, view, delta: -evt.deltaY } });
+      evt.preventDefault();
+    }, { passive: false });
+    imgEl.addEventListener("contextmenu", (evt) => evt.preventDefault());
+
+    // Touch: handled directly rather than relying on synthesized mouse
+    // events, which mobile browsers don't reliably emit for drags/moves.
+    // Deliberately does NOT focus keyCatcher - that's the kbToggle
+    // button's job only, so tapping/navigating never pops the keyboard.
+    imgEl.addEventListener("touchstart", (evt) => {
+      const t = evt.touches[0];
+      const p = t && toNormalized(imgEl, t);
+      if (p) press(p);
+      evt.preventDefault();
+    }, { passive: false });
+    imgEl.addEventListener("touchmove", (evt) => {
+      const now = performance.now();
+      if (now - lastMoveSent < 40) return;
+      lastMoveSent = now;
+      const t = evt.touches[0];
+      const p = t && toNormalized(imgEl, t);
+      if (p) sendCmd({ type: "mouse_move", payload: { ...p, view } });
+      evt.preventDefault();
+    }, { passive: false });
+    imgEl.addEventListener("touchend", (evt) => {
+      const t = evt.changedTouches[0];
+      const p = t && toNormalized(imgEl, t);
+      if (p) release(p);
+      evt.preventDefault();
+    }, { passive: false });
+  }
+
+  wireScreen(screenUserEl, "user");
+  wireScreen(screenIsolatedEl, "isolated");
+
+  // Minimize / Maximize (fullscreen) controls, one pair per screen.
+  function toggleMinimize(imgEl, btn) {
+    const minimized = imgEl.classList.toggle("minimized");
+    imgEl.closest(".panel").classList.toggle("is-minimized", minimized);
+    btn.textContent = minimized ? "Restore" : "Minimize";
+  }
+  function toggleMaximize(imgEl) {
+    if (document.fullscreenElement === imgEl) {
+      document.exitFullscreen();
+    } else if (imgEl.requestFullscreen) {
+      // Un-minimize first so there's something to show in fullscreen.
+      if (imgEl.classList.contains("minimized")) {
+        imgEl.classList.remove("minimized");
+        imgEl.closest(".panel").classList.remove("is-minimized");
+        const minBtn = document.querySelector('.winctl[data-target="' + imgEl.id + '"][data-action="min"]');
+        if (minBtn) minBtn.textContent = "Minimize";
+      }
+      imgEl.requestFullscreen().catch((e) => log("[fullscreen unavailable] " + e.message));
+    }
+  }
+  document.querySelectorAll(".winctl").forEach((btn) => {
+    const imgEl = document.getElementById(btn.dataset.target);
+    btn.addEventListener("click", () => {
+      if (btn.dataset.action === "min") toggleMinimize(imgEl, btn);
+      else toggleMaximize(imgEl);
+    });
+  });
+  // Keep each Maximize button's label in sync when the user exits
+  // fullscreen with Esc (which fires no click on our button).
+  document.addEventListener("fullscreenchange", () => {
+    document.querySelectorAll('.winctl[data-action="max"]').forEach((btn) => {
+      const imgEl = document.getElementById(btn.dataset.target);
+      btn.textContent = document.fullscreenElement === imgEl ? "Exit fullscreen" : "Maximize";
+    });
+  });
+
+  ws.onopen = () => log("[dashboard connected to backend]");
+
+  ws.onmessage = (evt) => {
+    const msg = JSON.parse(evt.data);
+    if (msg.type === "presence" && msg.from === "agent") {
+      const online = msg.payload.status === "connected";
+      statusEl.textContent = online ? "agent online" : "agent offline";
+      statusEl.className = "status " + (online ? "online" : "offline");
+    } else if (msg.type === "screen_frame") {
+      const target = msg.payload.view === "isolated" ? screenIsolatedEl : screenUserEl;
+      target.src = "data:image/png;base64," + msg.payload.image_b64;
+    } else if (msg.type === "command_result") {
+      log(msg.payload.output || msg.payload.error || "(no output)");
+    } else if (msg.type === "log") {
+      log("[agent] " + msg.payload.message);
+    }
+  };
+
+  function runCmdInput() {
+    if (!cmdInput.value.trim()) return;
+    sendCmd({ type: "run_powershell", command: cmdInput.value.trim() });
+    cmdInput.value = "";
+  }
+
+  // Enter works on most keyboards, but some Android IMEs' action button
+  // (shown as an arrow, "Go", or a checkmark instead of "Enter") don't
+  // reliably fire a keydown with key==="Enter" - the Run button is the
+  // reliable path regardless of keyboard/browser quirks.
+  cmdInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") runCmdInput();
+  });
+  cmdRun.addEventListener("click", runCmdInput);
+</script>
+</body>
+</html>

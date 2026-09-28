@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>RMM Devices</title>
+<style>
+  body { font-family: system-ui, sans-serif; background: #111; color: #eee; margin: 0; padding: 20px; }
+  h1 { font-size: 20px; margin-bottom: 16px; }
+  form.search { margin-bottom: 16px; }
+  input[type=text] { background: #1a1a1a; color: #0f0; border: 1px solid #333; font-family: monospace; padding: 8px; border-radius: 4px; }
+  #searchBox { width: 320px; }
+  button, .btn { background: #2d6cdf; color: #fff; border: none; padding: 8px 14px; border-radius: 4px; cursor: pointer; font-size: 14px; text-decoration: none; display: inline-block; }
+  button:hover, .btn:hover { background: #1f56b8; }
+  .btn-danger { background: #7f1a1a; }
+  .btn-danger:hover { background: #a52424; }
+  table { width: 100%; border-collapse: collapse; background: #1a1a1a; border-radius: 6px; overflow: hidden; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid #292929; }
+  th { color: #888; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; }
+  tr:last-child td { border-bottom: none; }
+  .status { display:inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; }
+  .online { background: #1a7f37; } .offline { background: #7f1a1a; }
+  .name-cell { display: flex; align-items: center; gap: 8px; }
+  .name-text { cursor: pointer; }
+  .name-text:hover { text-decoration: underline dotted; }
+  .name-input { background: #222; color: #fff; border: 1px solid #2d6cdf; border-radius: 4px; padding: 4px 6px; font-family: inherit; font-size: inherit; }
+  .device-id { color: #888; font-size: 12px; font-family: monospace; }
+  .empty { color: #888; padding: 24px; text-align: center; }
+  .pagination { margin-top: 16px; display: flex; gap: 8px; align-items: center; }
+  .pagination .btn.disabled { background: #333; pointer-events: none; color: #666; }
+  .pagination .current { color: #888; font-size: 14px; }
+</style>
+</head>
+<body>
+  {% csrf_token %}
+  <div style="display:flex; align-items:center; justify-content:space-between;">
+    <h1>Devices <span style="color:#888; font-size: 14px; font-weight: normal;">({{ page.paginator.count }} total)</span></h1>
+    <form method="post" action="{% url 'logout' %}" style="margin:0;">
+      {% csrf_token %}
+      <span style="color:#888; font-size:13px; margin-right:10px;">{{ user.username }}</span>
+      <button type="submit" class="btn btn-danger">Sign out</button>
+    </form>
+  </div>
+
+  <form class="search" method="get" action="{% url 'device_list' %}">
+    <input type="text" id="searchBox" name="q" value="{{ query }}" placeholder="Search by name or device id...">
+    {% if token %}<input type="hidden" name="token" value="{{ token }}">{% endif %}
+    <button type="submit">Search</button>
+    {% if query %}<a class="btn" href="{% url 'device_list' %}{% if token %}?token={{ token }}{% endif %}">Clear</a>{% endif %}
+  </form>
+
+  {% if page.object_list %}
+  <table>
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Device ID</th>
+        <th>OS</th>
+        <th>Status</th>
+        <th>Last seen</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for device in page.object_list %}
+      <tr data-device-id="{{ device.device_id }}">
+        <td>
+          <div class="name-cell">
+            <span class="name-text" title="Click to rename">{{ device.name }}</span>
+          </div>
+          {% if device.display_name %}<div class="device-id">(auto: {{ device.hostname|default:"-" }})</div>{% endif %}
+        </td>
+        <td class="device-id">{{ device.device_id }}</td>
+        <td>{{ device.os|default:"-" }}</td>
+        <td>
+          {% if device.is_online %}
+            <span class="status online">online</span>
+          {% else %}
+            <span class="status offline">offline</span>
+          {% endif %}
+        </td>
+        <td>{% if device.last_seen %}{{ device.last_seen|timesince }} ago{% else %}never{% endif %}</td>
+        <td>
+          <a class="btn" href="{% url 'dashboard' %}?device={{ device.device_id }}{% if token %}&token={{ token }}{% endif %}">Open</a>
+          <button class="btn btn-danger delete-btn" type="button" data-device-id="{{ device.device_id }}" data-online="{{ device.is_online|yesno:'1,0' }}">Delete</button>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <div class="pagination">
+    {% if page.has_previous %}
+      <a class="btn" href="?q={{ query }}&page={{ page.previous_page_number }}{% if token %}&token={{ token }}{% endif %}">&larr; Prev</a>
+    {% else %}
+      <span class="btn disabled">&larr; Prev</span>
+    {% endif %}
+    <span class="current">Page {{ page.number }} of {{ page.paginator.num_pages }}</span>
+    {% if page.has_next %}
+      <a class="btn" href="?q={{ query }}&page={{ page.next_page_number }}{% if token %}&token={{ token }}{% endif %}">Next &rarr;</a>
+    {% else %}
+      <span class="btn disabled">Next &rarr;</span>
+    {% endif %}
+  </div>
+  {% else %}
+  <div class="empty">
+    {% if query %}No devices match "{{ query }}".{% else %}No devices have connected yet. Start an agent and it'll show up here.{% endif %}
+  </div>
+  {% endif %}
+
+<script>
+  const csrfToken = document.querySelector('input[name=csrfmiddlewaretoken]').value;
+
+  function makeNameEditable(span, deviceId) {
+    span.addEventListener('click', () => {
+      const current = span.textContent;
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.className = 'name-input';
+      input.value = current;
+      span.replaceWith(input);
+      input.focus();
+      input.select();
+
+      let committed = false;
+      const commit = async () => {
+        if (committed) return;
+        committed = true;
+        const newName = input.value.trim();
+        const newSpan = document.createElement('span');
+        newSpan.className = 'name-text';
+        newSpan.title = 'Click to rename';
+        newSpan.textContent = newName || current;
+        input.replaceWith(newSpan);
+        makeNameEditable(newSpan, deviceId);
+
+        if (newName && newName !== current) {
+          try {
+            const resp = await fetch(`/devices/${encodeURIComponent(deviceId)}/rename/`, {
+              method: 'POST',
+              headers: {
+                'X-CSRFToken': csrfToken,
+                'Content-Type': 'application/x-www-form-urlencoded',
+              },
+              body: `display_name=${encodeURIComponent(newName)}`,
+            });
+            const data = await resp.json();
+            newSpan.textContent = data.name;
+          } catch (e) {
+            newSpan.textContent = current;
+          }
+        }
+      };
+
+      input.addEventListener('blur', commit);
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') input.blur();
+        if (e.key === 'Escape') { input.value = current; input.blur(); }
+      });
+    });
+  }
+
+  document.querySelectorAll('tr[data-device-id]').forEach((row) => {
+    makeNameEditable(row.querySelector('.name-text'), row.dataset.deviceId);
+  });
+
+  document.querySelectorAll('.delete-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const deviceId = btn.dataset.deviceId;
+      const online = btn.dataset.online === '1';
+      const warning = online
+        ? `"${deviceId}" is currently online - this will also tell it to disconnect and remove its startup task. Continue?`
+        : `Remove "${deviceId}" from the list?`;
+      if (!confirm(warning)) return;
+
+      btn.disabled = true;
+      btn.textContent = 'Deleting...';
+      try {
+        const resp = await fetch(`/devices/${encodeURIComponent(deviceId)}/delete/`, {
+          method: 'POST',
+          headers: { 'X-CSRFToken': csrfToken },
+        });
+        if (resp.ok) {
+          btn.closest('tr').remove();
+        } else {
+          btn.disabled = false;
+          btn.textContent = 'Delete';
+        }
+      } catch (e) {
+        btn.disabled = false;
+        btn.textContent = 'Delete';
+      }
+    });
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,39 @@
+1. Get the project onto the server
+Easiest: when you start the RDP session, enable local drive/clipboard redirection (in the RDP client's local resources settings before connecting), then you can just copy-paste the whole rmm-project folder from your PC straight into the server (e.g. C:\rmm-project). If that's not available, zip the folder locally and upload it somewhere you can download from inside the RDP session.
+
+2. Install Python on the server
+Download and run the installer from python.org (3.11 or 3.12) — check "Add python.exe to PATH" during install. Verify:
+
+
+python --version
+3. Install dependencies and set up the database
+In an RDP terminal (PowerShell), on the server:
+
+
+cd C:\rmm-project\backend
+python -m venv venv
+venv\Scripts\pip install -r requirements.txt
+venv\Scripts\python manage.py migrate
+4. Open the firewall port
+Still on the server:
+
+
+New-NetFirewallRule -DisplayName "RMM-8000" -Direction Inbound -Protocol TCP -LocalPort 8000 -Action Allow
+5. Start the backend
+
+venv\Scripts\daphne -b 0.0.0.0 -p 8000 config.asgi:application
+Since you don't want auth, don't set RMM_SHARED_SECRET — leave it as-is and it stays open.
+
+6. Find the server's address
+If it's a cloud VM (Azure/AWS/etc.), use its public IP (from your cloud provider's dashboard).
+Run ipconfig on the server if you need to double check its own view of its address.
+7. Test from your PC
+Open http://<server-public-ip>:8000/ in a browser — you should see the device list page.
+
+8. Point agents/installer at it
+Rebuild the installer with the server's real address:
+
+
+cd agents\python-agent\installer
+"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DServerURL=ws://<server-public-ip>:8000 rmm-agent.iss
+One thing worth knowing before you go further: a process started in an interactive RDP terminal dies if you log off (surviving a plain disconnect is fine for a quick test, though). For anything longer than a quick test, say so and I'll walk you through wrapping daphne as a proper Windows service so it survives reboots/logoffs too.
